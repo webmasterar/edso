@@ -50,7 +50,7 @@ char getNextChar(ifstream & f)
     return c;
 }
 
-void output(ofstream & f, Segment segment)
+void output(ofstream & f, Segment & segment)
 {
     if (segment.size() == 1)
     {
