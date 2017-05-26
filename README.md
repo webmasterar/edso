@@ -8,6 +8,6 @@ Usage example:
 
 ### Installation
 
-First extract the vcflib.tar.gz archive, then compile EDSO by running `make`.
+First run `./pre-install.sh`, then compile EDSO by running `make`.
 
 License: GNU GPLv3 License; Copyright (C) 2017 Ahmad Retha
