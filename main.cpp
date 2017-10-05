@@ -23,11 +23,21 @@
 #include <algorithm>
 #include <Variant.h>
 
-#define BUFFERSIZE 1000000
-
 using namespace std;
 using namespace vcflib;
+
 typedef vector<string> Segment;
+
+struct VarItem
+{
+    unsigned int pos;
+    unsigned int skip;
+    Segment seg;
+};
+
+typedef vector<struct VarItem> VarItemArray;
+
+#define BUFFERSIZE 1000000
 
 char BUFF[BUFFERSIZE];
 int BUFFLIMIT = 0;
@@ -47,7 +57,94 @@ char getNextChar(ifstream & f)
     if (++POS == BUFFLIMIT) {
         BUFFLIMIT = 0;
     }
-    return c;
+
+    if (c == 'A' || c == 'C' || c == 'G' || c == 'T' || c == 'N') {
+        return c;
+    } else {
+        return getNextChar(f);
+    }
+}
+
+bool populateVarItemArray(string vcfName, VarItemArray & variantItems)
+{
+    VariantCallFile vf;
+    vf.open(vcfName);
+    if (!vf.is_open()) {
+        cerr << "Error: Failed to open variants file!" << endl;
+        return false;
+    }
+    Variant v(vf);
+    unsigned int prevPos = 0, prevRefLen = 0;
+    unsigned int currPos, currRefLen;
+
+    while (vf.getNextVariant(v))
+    {
+        currPos = v.position;
+        currRefLen = v.ref.length();
+        //handle duplicates
+        if (currPos == prevPos)
+        {
+            //check duplicate doesn't have a longer ref -- if it does merge new ref into segment
+            if (currRefLen > prevRefLen && !(v.ref[0] == '<' || v.ref[0] == '.'))
+            {
+                Segment updSeg;
+                for (const string & t : variantItems.back().seg)
+                {
+                    string r = t;
+                    if (r.length() < currRefLen) {
+                        r += v.ref.substr(prevRefLen);
+                    }
+                    updSeg.push_back(r);
+                }
+                updSeg[0] = v.ref;
+                variantItems.back().seg = updSeg;
+                variantItems.back().skip = currRefLen;
+            }
+            //add new alts
+            for (const string & t : v.alt)
+            {
+                if (!(v.ref[0] == '<' || v.ref[0] == '.')) {
+                    variantItems.back().seg.push_back(t);
+                }
+            }
+        }
+        //handle nested variants
+        else if (currPos < (prevPos + prevRefLen))
+        {
+            Segment lastSeg;
+            for (const string & s : variantItems.back().seg)
+            {
+                for (const string & t : v.alt)
+                {
+                    if ((prevPos + s.length()) > currPos && !(t[0] == '<' || t[0] == '.')) {
+                        string r;
+                        r = s.substr(0, currPos - prevPos);
+                        r += t;
+                        r += s.substr(currPos - prevPos + 1);
+                        lastSeg.push_back(r);
+                    }
+                }
+            }
+            for (const string & r : lastSeg) {
+                variantItems.back().seg.push_back(r);
+            }
+        }
+        //handle regular variants
+        else
+        {
+            Segment currSeg;
+            for (const string & t : v.alleles) {
+                if (!(t[0] == '<' || t[0] == '.')) {
+                    currSeg.push_back(t);
+                }
+            }
+            struct VarItem varItem = {currPos, currRefLen, currSeg};
+            variantItems.push_back(varItem);
+            prevPos = currPos;
+            prevRefLen = currRefLen;
+        }
+    }
+    return true;
 }
 
 void output(ofstream & f, Segment & segment)
@@ -75,8 +172,8 @@ void output(ofstream & f, Segment & segment)
 int main(int argc, char * argv[])
 {
     string help = "EDSO (Elastic Degenerate Sequence Outputter) takes a reference \
-    fasta file and VCF file and produces an EDS format file.\n\n \
-    \tUsage example: ./edso reference.fasta variants.vcf.gz [outfile.eds]";
+fasta file and VCF file and produces an EDS format file.\n\n \
+\tUsage example: ./edso reference.fasta variants.vcf.gz [outfile.eds]";
 
     if (argc == 1 || (argc == 2 && (strcmp("--help", argv[1]) == 0 || strcmp("-h", argv[1]) == 0))) {
         cout << help << endl;
@@ -94,15 +191,6 @@ int main(int argc, char * argv[])
     ifstream rf(refName.c_str(), ios::in);
     if (!rf.good()) {
         cerr << "Error: Failed to open reference file!" << endl;
-        return 1;
-    }
-
-    //vcf file
-    string vcfName = argv[2];
-    VariantCallFile vf;
-    vf.open(vcfName);
-    if (!vf.is_open()) {
-        cerr << "Error: Failed to open variants file!" << endl;
         return 1;
     }
 
@@ -129,56 +217,27 @@ int main(int argc, char * argv[])
     string tBuff = "";
     tBuff.reserve(BUFFERSIZE);
     char c;
-    unsigned int rfIdx = 1, vfIdx = 0, i = 0;
+    unsigned int rfIdx = 1, i = 0, j;
     Segment segment;
     getline(rf, tBuff); //skip first line of fasta file
     tBuff = "";
 
     //create variables for reading through vcf records and looking for duplicates
-    Variant var(vf), vBuffer(vf), var2(vf);
-    bool hasMoreVariants = true;
-    Segment vAlleles;
-
-    // read first variant and possibly successive duplicates for the same position, removing duplicate alleles
-    hasMoreVariants = vf.getNextVariant(var);
-    if (hasMoreVariants)
-    {
-        vfIdx = (unsigned int) var.position;
-        for (const auto & a : var.alleles) {
-            if (a[0] != '<') {
-                vAlleles.push_back(a);
-            }
-        }
-        while (true) {
-            hasMoreVariants = vf.getNextVariant(var2);
-            if (hasMoreVariants)
-            {
-                if (var2.position == var.position) {
-                    for (const auto & a : var2.alt) {
-                        if (a[0] != '<') {
-                            vAlleles.push_back(a);
-                        }
-                    }
-                } else {
-                    vBuffer = var2;
-                    break;
-                }
-            }
-            else
-            {
-                break;
-            }
-        }
+    VarItemArray variantItems;
+    bool parsedVCF = populateVarItemArray(string(argv[2]), variantItems);
+    if (!parsedVCF) {
+        cerr << "Exiting!" << endl;
+        return 1;
     }
+    VarItemArray::iterator vit = variantItems.begin();
+    unsigned int vPos = vit->pos;
+    unsigned int vSkip = vit->skip;
+    Segment vSeg = vit->seg;
 
     // go through the reference sequence
     while ((c = getNextChar(rf)) != '\0')
     {
-        if (!(c == 'A' || c == 'C' || c == 'G' || c == 'T' || c == 'N')) {
-            continue;
-        }
-
-        if (rfIdx != vfIdx)
+        if (rfIdx != vPos)
         {
             tBuff += c;
             i++;
@@ -189,9 +248,11 @@ int main(int argc, char * argv[])
                 tBuff = "";
                 i = 0;
             }
+            rfIdx++;
         }
-        else
+        else //rfIdx == vPos
         {
+            //output buffered text
             segment.clear();
             if (tBuff.length() > 0) {
                 segment.push_back(tBuff);
@@ -199,47 +260,24 @@ int main(int argc, char * argv[])
                 tBuff = "";
             }
 
-            //then search current variant
-            if (vAlleles.size() > 0) {
-                output(of, vAlleles);
-                vAlleles.clear();
+            //then output current variant segment and skip required number of characters
+            output(of, vSeg);
+            for (j = 1; j < vSkip; j++) {
+                getNextChar(rf);
             }
+            rfIdx += vSkip;
 
-            //fetch the next variant to be searched when its position comes up
-            if (vBuffer.alleles.size() > 0)
-            {
-                vfIdx = (unsigned int) vBuffer.position;
-                for (const auto & a : vBuffer.alleles) {
-                    if (a[0] != '<') {
-                        vAlleles.push_back(a);
-                    }
+            //get the next variant position, skipping repeats or nested variants
+            do {
+                if (++vit == variantItems.end()) {
+                    break;
                 }
-
-                vBuffer.alleles.clear();
-
-                while (true) {
-                    hasMoreVariants = vf.getNextVariant(var2);
-                    if (hasMoreVariants)
-                    {
-                        if (vfIdx == (unsigned int) var2.position) {
-                            for (const auto & a : var2.alt) {
-                                if (a[0] != '<') {
-                                    vAlleles.push_back(a);
-                                }
-                            }
-                        } else {
-                            vBuffer = var2;
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
+                vPos = vit->pos;
+                vSkip = vit->skip;
+                vSeg = vit->seg;
             }
+            while (vPos < rfIdx);
         }
-        rfIdx++;
     }
     if (tBuff.length() > 0)
     {
