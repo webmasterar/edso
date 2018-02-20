@@ -6,6 +6,8 @@ Usage example:
 
 `./edso reference.fasta variants.vcf.gz outfile.eds`
 
+If you wish to generate random EDS files, please visit https://github.com/webmasterar/EDSRand
+
 ### Installation
 
 First run `./pre-install.sh`, then compile EDSO by running `make`.
